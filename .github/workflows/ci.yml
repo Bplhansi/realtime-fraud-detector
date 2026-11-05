@@ -1,0 +1,139 @@
+# Continuous integration: build and test everything on every push.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: C++ engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      # The parity tests: Python writes transactions, features, a small model and its
+      # scores; the C++ tests must reproduce them.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Configure
+        shell: bash
+        run: cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+
+      - name: Build
+        run: cmake --build engine/build --config Release
+
+      - name: Run tests
+        run: ctest --test-dir engine/build -C Release --output-on-failure
+
+  python:
+    name: Python tests (with the C++ engine module)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # pybind11 is named explicitly too: without it the engine module can't be built.
+      - name: Install test packages
+        run: pip install -r requirements-dev.txt pybind11==3.1.0
+
+      # Builds the pybind11 module so the C++ vs Python engine test runs too.
+      - name: Build the engine module
+        run: |
+          python -m pybind11 --version
+          cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+          cmake --build engine/build --target fraud_engine -j 4
+
+      - name: Run tests with coverage
+        run: python -m pytest --cov=sim --cov=ml --cov=api --cov=dashboard --cov-report=term
+
+  # Every C++ test again with AddressSanitizer + UndefinedBehaviorSanitizer
+  # (they stop the program on memory errors such as reading past the end of an array).
+  sanitizers:
+    name: C++ engine with AddressSanitizer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Configure (Debug + sanitizers)
+        run: >
+          cmake -S engine -B engine/build-asan -DCMAKE_BUILD_TYPE=Debug -DFD_WITH_PYTHON=OFF
+          -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build engine/build-asan -j 4
+
+      - name: Run tests
+        env:
+          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir engine/build-asan --output-on-failure
+
+  # The one-command demo, from a clean machine.
+  docker-demo:
+    name: Docker one-command demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: docker compose up --build
+        run: docker compose up --build --detach
+
+      - name: Check the pipeline finished successfully
+        run: |
+          docker compose logs pipeline
+          code=$(docker compose ps --all --format '{{.ExitCode}}' pipeline)
+          echo "pipeline exit code: $code"
+          test "$code" = "0"
+
+      - name: Check the API and dashboard answer
+        run: |
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8000/health && break; sleep 2; done
+          curl -fs http://127.0.0.1:8000/health
+          curl -fs http://127.0.0.1:8501/_stcore/health
+          curl -fs -X POST http://127.0.0.1:8000/score -H 'Content-Type: application/json' \
+            -d '{"step": 620, "type": "TRANSFER", "amount": 9500, "nameOrig": "C1231006815", "nameDest": "C9999999"}'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop
+        if: always()
+        run: docker compose down --volumes
