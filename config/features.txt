@@ -1,0 +1,21 @@
+# The model's input features, in order. Python (ml/features.py) and C++ (engine/src/features.cpp)
+# both check that they compute exactly this list, so the two can never drift apart.
+# Time is PaySim's "step": 1 step = 1 hour. Only transactions BEFORE the current one are used.
+# Each account remembers its last 64 outgoing and 64 incoming transactions (ring buffers).
+amount_log
+amount_vs_sender_avg
+sender_tx_1h
+sender_tx_24h
+hours_since_sender_last
+sender_is_new
+pair_seen_before
+receiver_distinct_senders_24h
+receiver_is_new
+sender_inflow_24h_ratio
+hours_since_sender_first_seen
+receiver_is_merchant
+type_CASH_IN
+type_CASH_OUT
+type_DEBIT
+type_PAYMENT
+type_TRANSFER
